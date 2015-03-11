@@ -13,7 +13,7 @@ byte mac[] = {
   0x00, 0xAA, 0xBB, 0xCC, 0x1E, 0x02
 };
 
-byte server[] = { 10, 0, 0, 211 };
+byte server[] = { 54, 172, 208, 237 };
 IPAddress ip;
 
 // Callback function header
@@ -51,15 +51,19 @@ void setup() {
 
   getDhcpAddr();
   
+  Serial.println("attempting to communicate with mqtt server");
   if (client.connect("locker")) {
     client.publish("register",name);
     client.subscribe("lock");
+  } else {
+      Serial.println("failed to connect with mqtt server");
   }
 }
 
 void loop() {
   delay(1000);
   Serial.println("looping...");
+  client.loop();
 }
 
 // Callback function
