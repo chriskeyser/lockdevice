@@ -1,13 +1,13 @@
-/*
- */
-
 #include <SPI.h>
 #include <Ethernet.h>
 #include <PubSubClient.h>
 #include <avr/pgmspace.h>
 
-// Enter a MAC address and IP address for your controller below.
-// The IP address will be dependent on your local network.
+#define STATE_INIT 1
+#define STATE_ASSIGNING 2
+#define STATE_CONNECTING 3
+#define STATE_RUNNING 4
+
 // gateway and subnet are optional:
 byte mac[] = {
   0x00, 0xAA, 0xBB, 0xCC, 0x1E, 0x02
@@ -15,6 +15,8 @@ byte mac[] = {
 
 byte server[] = { 54, 172, 208, 237 };
 IPAddress ip;
+
+byte state=STATE_INIT;
 
 // Callback function header
 void callback(char* topic, byte* payload, unsigned int length);
@@ -25,12 +27,12 @@ PubSubClient client(server, 9999, callback, ethClient);
 boolean gotAMessage = false; // whether or not you got a message from the client yet
 char *name = {"lock-cl-DEEDBAFEFEEF"};
 
-void getDhcpAddr() {
+bool getDhcpAddr() {
   // start the Ethernet connection:
   Serial.println("Trying to get an IP address using DHCP");
-  while (Ethernet.begin(mac) == 0) {
+  if(Ethernet.begin(mac) == 0) {
     Serial.println("Failed to configure Ethernet using DHCP");
-    delay(1000);
+    return false;
   }
   
   // print your local IP address:
@@ -43,27 +45,63 @@ void getDhcpAddr() {
   }
   
   Serial.println();
+  return true;
 }
 
 void setup() {
   // Open serial communications and wait for port to open:
   Serial.begin(9600);
+}
 
-  getDhcpAddr();
-  
-  Serial.println("attempting to communicate with mqtt server");
+void initialize() {
+  if(getDhcpAddr()) {
+    state = STATE_ASSIGNING;
+  }
+}
+
+void assign() {
+  //TODO: UDP to obtain server addr.
+  state = STATE_CONNECTING;
+}
+
+void connectMqtt() {
+    Serial.println("attempting to communicate with mqtt server");
   if (client.connect("locker")) {
     client.publish("register",name);
     client.subscribe("lock");
+    state = STATE_RUNNING;
   } else {
       Serial.println("failed to connect with mqtt server");
   }
 }
 
 void loop() {
-  delay(1000);
-  Serial.println("looping...");
-  client.loop();
+  switch(state)
+  {
+    case STATE_INIT:
+      Serial.println("intializing");
+      initialize();
+      break;
+    case STATE_ASSIGNING:
+      Serial.println("assigning");
+      assign();
+      break;
+    case STATE_CONNECTING:
+      Serial.println("connecting");
+      connectMqtt();
+      break;
+    case STATE_RUNNING:   
+      delay(500);
+      client.loop();
+      break;
+    default:
+      Serial.println();
+      Serial.print("invalid state: ");
+      Serial.print(state, HEX);
+      Serial.println();
+      state = STATE_INIT;
+      break;
+  }
 }
 
 // Callback function
