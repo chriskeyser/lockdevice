@@ -25,6 +25,18 @@ PubSubClient::PubSubClient(char* domain, uint16_t port, void (*callback)(char*,u
    this->port = port;
 }
 
+void PubSubClient::setServer(uint8_t *ip, uint16_t port) {
+	this->ip = ip;
+	this->port = port;
+	this->domain = NULL;
+}
+
+void PubSubClient::setServer(char* domain, uint16_t port) {
+	this->domain = domain;
+	this->port = port;
+	this->ip = NULL;
+}
+
 boolean PubSubClient::connect(char *id) {
    return connect(id,NULL,NULL,0,0,0,0);
 }
