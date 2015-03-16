@@ -52,7 +52,7 @@ char packetBuffer[UDP_TX_PACKET_MAX_SIZE+1];
 // Callback function header
 void callback(char* topic, byte* payload, unsigned int length);
 
-// Network clients to use in processing...
+// various clients to use in processing...
 EthernetClient ethClient;
 EthernetUDP Udp;
 
@@ -281,6 +281,16 @@ bool parseServerIpAddress() {
   return isValid;
 }
 
+void setMqttConfig() {
+    if(parseServerIpAddress()) {
+      logMessage(String("Connecting to mqtt with IP address: ") + ipToStr(mqttServerIp) + ":" + mqttPort);
+      client.setServer(mqttServerIp, mqttPort);
+    } else {
+     logMessage(String("Connecting to mqtt with domain: ") + mqttServer);
+      client.setServer(mqttServer, mqttPort);        
+    }  
+}
+
 /*****
 *  Functions to process states.
 */
@@ -291,13 +301,7 @@ void initializeState() {
       Udp.begin(BCAST_PORT);
     } else {
       // check if IP address, if so then initiate with ip else initiate with dns.
-      if(parseServerIpAddress()) {
-        logMessage(String("Connecting to mqtt with IP address: ") + ipToStr(mqttServerIp) + ":" + mqttPort);
-        client.setServer(mqttServerIp, mqttPort);
-      } else {
-       logMessage(String("Connecting to mqtt with domain: ") + mqttServer);
-        client.setServer(mqttServer, mqttPort);        
-      }
+      setMqttConfig();
       changeState(STATE_CONNECTING);
     }
   }
@@ -385,6 +389,7 @@ void configState() {
 }
 
 void testMqttState() {
+  setMqttConfig();
   if(connectMqttState()) {
     makeReply("success");
   } else {
@@ -398,6 +403,7 @@ void testMqttState() {
 
 bool connectMqttState() {
   logMessage("attempting to communicate with mqtt server");
+  
   if (client.connect("locker")) {
     client.publish("register",deviceId);
     client.subscribe("lock");
