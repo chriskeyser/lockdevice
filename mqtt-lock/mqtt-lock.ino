@@ -227,7 +227,6 @@ bool readConfig() {
   return false;
 }
 
-
 /************
 * Functions to help with packet parsing, validation and creation
 */
@@ -258,8 +257,6 @@ String makeReply(char *content) {
   }
   return replyMsg;
 }
-
-
 
 bool parseServerIpAddress() {
   int partCnt;
