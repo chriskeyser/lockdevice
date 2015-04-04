@@ -1,0 +1,4 @@
+mttq library: http://knolleary.net/arduino-client-for-mqtt/api/#subscribe
+Arduino: http://arduino.cc/en/Guide/Windows#toc2, using 1.6.1
+JSON: https://github.com/bblanchon/ArduinoJson/wiki/Using%20the%20library%20with%20Arduino
+AES: http://forum.arduino.cc/index.php?topic=88890.0, http://utter.chaos.org.uk/~markt/AES-library.zip
