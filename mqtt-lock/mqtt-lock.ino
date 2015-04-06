@@ -1,9 +1,12 @@
+//#include <sha256.h>
+
 #include <AES.h>
 #include <SPI.h>
 #include <Ethernet.h>
 #include <EEPROM.h>
 #include <EthernetUdp.h>
-#define UDP_TX_PACKET_MAX_SIZE 192
+
+#define UDP_TX_PACKET_MAX_SIZE 144
 #include <PubSubClient.h>
 #include <avr/pgmspace.h>
 #include <string.h>
@@ -30,9 +33,12 @@
 #define KEY_LENGTH        16
 #define KEY_BITS          128
 #define SAMPLE_PIN        15      
-#define MAX_ENCRYPT_SIZE  (3*N_BLOCK)-1
-#define TOTAL_ENCRYPT_SZ  4*N_BLOCK
-#undef ENCRYPT
+#define MAX_ENCRYPT_SIZE  (10*N_BLOCK)-1
+#define TOTAL_ENCRYPT_SZ  11*N_BLOCK
+#define ENCRYPT
+#define START_ENCRYPT_DATA 24
+#define MAX_ENCRYPT_MSG   START_ENCRYPT_DATA + TOTAL_ENCRYPT_SZ
+#define EIV
 
 // EEPROM locations
 #define CONFIG_LENGTH     100
@@ -98,7 +104,7 @@ IPAddress myip(0, 0, 0, 0);
 #define LOCK_CHALLENGE 1
 #define LOCK_RESPONSE 2
 #define LOCK_OPERATION 3
-#define MAX_JSON_MSG   JSON_OBJECT_SIZE(10)
+#define JSON_5_ATTRIBUTES   JSON_OBJECT_SIZE(5)
 char controlTopic[] = "lockctl";
 PubSubClient mqttClient(server, 1883, callback, ethClient);
 
@@ -110,29 +116,40 @@ PubSubClient mqttClient(server, 1883, callback, ethClient);
 /************
 * Functions for writing debug information out serial port.
 */
-String ipToStr(IPAddress addr) {
+char *ipToStr(IPAddress addr, char *target, int maxlen) {
   if(addr != NULL) {
-    String addrStr = String(addr[0]);
-    for (int i = 1; i < 4; i++) {
-      addrStr += (".");
-      addrStr += addr[i];
-    }  
-    return addrStr;
+    snprintf(target, maxlen, "%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3]);
   } else {
-    return String();
+    *target = 0;
   }
+
+  return target;
 }
 
 void printIP(IPAddress addr) {
-  Serial.print(ipToStr(addr));
+  char ipStr[24]; 
+  Serial.print(ipToStr(addr, ipStr, 24));
 }
 
-void logMessage(String msg) {
+void logMessage(char *msg) {
   Serial.println(msg);
 }
 
-void printBuffer(char *title, void *data, int bufLength) {
+void logIntValue(char *msg, int value) {
+   Serial.print(msg);
+   Serial.println(value);
+}
+
+void logStrValue(char *msg, char *value) {
+  Serial.print(msg);
+  Serial.println(value);
+}
+
+void logBuffer(char *title, void *data, int bufLength) {
   Serial.print(title);
+  Serial.print("size:");
+  Serial.print(bufLength);
+  Serial.print(" data:");
   byte *bytes = (byte *) data;
   
   for(int i = 0; i < bufLength; i++) {
@@ -144,26 +161,30 @@ void printBuffer(char *title, void *data, int bufLength) {
 
 void logPacket(int packetSize, IPAddress addr, int port, char * data)
 {
+  char ipaddrStr[24];
+
   Serial.print("Udp rcv: ");
   Serial.print(packetSize);
   Serial.print( " bytes from: ");
-  Serial.print(ipToStr(addr));
+  Serial.print(ipToStr(addr, ipaddrStr, 24));
   Serial.print(":");
   Serial.print(port);
-  printBuffer("data", data, packetSize);
+  logBuffer("data", data, packetSize);
 }
 
 /************
 * Functions for working with network interactions.
 */
-bool getDhcpAddr() { 
+bool getDhcpAddr() {
+  char ipaddrStr[24];
+
   if(Ethernet.begin(mac) == 0) {
     logMessage("Failed to configure Ethernet using DHCP");
     return false;
   }
   
   myIp = Ethernet.localIP();
-  logMessage(String("My IP address: ") + ipToStr(myIp));
+  logStrValue("My IP address: ", ipToStr(myIp, ipaddrStr, 24));
   return true;
 }
 
@@ -185,7 +206,10 @@ int udpReadPacket() {
 * Functions for managing state.
 */
 void changeState(byte newState) {
-  String logMsg = String("changing state from:") + currentState + " to:" + + newState;
+  int maxlen = 100;
+  char logMsg[maxlen];
+
+  snprintf(logMsg, maxlen, "changing state from: %d to %d", currentState,newState);
   logMessage(logMsg);
   currentState = newState;
 }
@@ -230,7 +254,6 @@ bool writeBufToEEProm(int start, void *data, byte dataSize) {
 
 bool readStrFromEEProm(unsigned int start, char *data, byte maxSize) {
   byte bytesRead = readBufFromEEProm(start, (byte *) data, maxSize - 1);
-  Serial.println(bytesRead);
   if(bytesRead > 0) {    // make sure zero terminated.
     data[bytesRead] = 0;
   }
@@ -239,6 +262,9 @@ bool readStrFromEEProm(unsigned int start, char *data, byte maxSize) {
 }
 
 byte readBufFromEEProm(unsigned int start, byte *data, byte maxSize) {
+  int maxlen = 100;
+  char logmsg[maxlen];
+
   byte bufSize = EEPROM.read(start);
   
   if(bufSize == 255) { // not previously written
@@ -249,7 +275,8 @@ byte readBufFromEEProm(unsigned int start, byte *data, byte maxSize) {
   int curPos = start + 1;
     
   if(readSize < bufSize) {
-    logMessage(String("var size: ") + bufSize + " is greater than max size:" + maxSize + ", only reading partial");
+   snprintf(logmsg, maxlen, "var size: %d, max size: %d, partial read EEProm", bufSize, maxSize);
+    logMessage(logmsg);
   }
 
   for(byte i = 0; i < readSize; i++) {
@@ -286,51 +313,110 @@ void generateRandom(byte *buf, int len) {
   }
 }
 
-int encryptData(byte *data, byte dataSize){
+int encryptData(void *data, byte dataSize){
   byte iv[N_BLOCK];  
+  int encryptSize = 0;
+
+  byte setKeyResult = aes.set_key (aesKey, KEY_BITS);
+  
+  if(setKeyResult != SUCCESS) {
+     logMessage("failed on init key");
+     return 0;
+   }
 
   if(dataSize > MAX_ENCRYPT_SIZE) {
+    logIntValue("encrypt max blk size exceeded: ", dataSize);
     return 0;
   }
 
   byte sz = dataSize + 1;
 
+#ifdef EIV
   int blocks = (sz / N_BLOCK) + 1;
+#else
+  int blocks = sz / N_BLOCK;
+#endif
 
   if(sz % N_BLOCK > 0) {
     blocks++;
   }
 
-  generateRandom(iv, N_BLOCK);
-  generateRandom(plainTextBuf, blocks * N_BLOCK);
+  encryptSize = blocks * N_BLOCK;
 
-  //Explicit Initialization Vector (discard 1st block) 
+  logIntValue("No blocks encrypting:", blocks+1);
+  logIntValue("data size: ", sz);
+  
+  generateRandom(iv, N_BLOCK);
+  generateRandom(plainTextBuf, N_BLOCK);
+  logBuffer("iv:", iv, N_BLOCK);
+
+#ifdef EIV
+  //Explicit Initialization Vector (discard 1st block)
+  
   plainTextBuf[N_BLOCK] = dataSize;
   memcpy(&plainTextBuf[N_BLOCK+1], data, dataSize);
-  aes.cbc_encrypt(plainTextBuf, cipherBuf, blocks, iv);
-  return (blocks + 1) * N_BLOCK;
+
+  // PKCS5 padding method.
+  byte paddingSize = N_BLOCK-(sz % N_BLOCK);
+  for(int i = dataSize+N_BLOCK+1; i < encryptSize; i++) {
+    plainTextBuf[i] = paddingSize;
+  }
+
+  logBuffer("plaintext: ", plainTextBuf, encryptSize);
+  byte succ = aes.cbc_encrypt(plainTextBuf, cipherBuf, blocks, iv);
+#else
+  // going to put iv at the start of the buffer instead of using EIV
+  plainTextBuf[0] = dataSize;
+  memcpy(&plainTextBuf[1], data, dataSize); 
+  byte succ = aes.cbc_encrypt(plainTextBuf, &cipherBuf[N_BLOCK], blocks, iv);  
+  memcpy(cipherBuf, iv, N_BLOCK);
+  encryptSize += N_BLOCK;
+#endif
+  logIntValue("Encrypt size:", encryptSize);
+  logBuffer("Encrypted:", cipherBuf, encryptSize);
+  
+  if(succ == SUCCESS) {
+    logMessage("done encryption");
+    return encryptSize;
+  } else {
+    logMessage("Failed on encrypt operation");
+    return 0;
+  }
 }
 
 byte decryptData(byte *cipher, byte *decrypted, int size, int bufsize) {
   byte iv[N_BLOCK];
   int blocks = size / N_BLOCK;
   byte datasize = 0;
-
+  int maxlen = 100;
+  char logmsg [maxlen];
+ 
   if(size % N_BLOCK > 0) {
-    logMessage("warning: invalid size decrypted buffer");
+    logIntValue("warning: invalid size decrypted buffer:", size);
     return 0;
   }
-  
+ 
+  logIntValue(" number of blocks: ", blocks);
+
   // iv doesn't matter since using EIV
-  aes.cbc_decrypt(cipher, plainTextBuf, blocks, iv);
-  datasize = plainTextBuf[N_BLOCK];
+  if(aes.cbc_decrypt(cipher, plainTextBuf, blocks, iv) == FAILURE) {
+    logMessage("failure on decrypt");
+  } else {
+    logMessage("decrypted");
+    logBuffer("decrypted: ", plainTextBuf, size);
+    logMessage((char*) plainTextBuf);
+
+    datasize = plainTextBuf[N_BLOCK];
   
-  if( bufsize < datasize) {
-    logMessage(String("decrypt: buf too small: ") + bufsize + ":" + datasize);
-    return 0;
+    if( bufsize < datasize) {
+      snprintf(logmsg, maxlen, "decrypt: buf size: %d too small data size: %d", bufsize, datasize);
+      logMessage(logmsg);
+      return 0;
+    }
+
+    memcpy(decrypted, &plainTextBuf[N_BLOCK+1], datasize);
   }
 
-  memcpy(decrypted, &plainTextBuf[N_BLOCK+1], datasize);
   return datasize;
 }
 
@@ -341,6 +427,8 @@ byte decryptData(byte *cipher, byte *decrypted, int size, int bufsize) {
 ****/
 bool validateHeader(char *buf, int buflen) {
   int sigSize = strlen(initSig);
+  int maxlen = 100;
+  char logmsg[maxlen];
   
   if(buf == NULL || buflen < (sigSize + 1) || strncmp(buf, initSig, sigSize) != 0) {
     logMessage("state missing from packet header, resetting to init");
@@ -351,12 +439,13 @@ bool validateHeader(char *buf, int buflen) {
   byte state = (byte) buf[sigSize];
   
   if(state != currentState) {
-    logMessage(String("invalid state, expected: ") + currentState + " got: " + state + "restarting...");
+    snprintf(logmsg, maxlen, "Invalid state expected %d got %d restarting...", currentState, state);
+    logMessage(logmsg);
     changeState(STATE_INIT);
     return false;
   }
   
-  logMessage(String("valid header, state: ") + state);
+  logIntValue("valid header, state: ", state);
   return true;
 }
 
@@ -376,7 +465,7 @@ void sendReplyMessage(const char *msgData, int dataSize) {
   }
   
   udpSendPacket(configAgentIp, INIT_SEND, txPacketBuffer, msgSize);
-  printBuffer("tx msg: ", txPacketBuffer, msgSize);
+  logBuffer("tx msg: ", txPacketBuffer, msgSize);
 }
 
 bool parseServerIpAddress() {
@@ -403,12 +492,16 @@ bool parseServerIpAddress() {
 ***/
 bool readConfig() {
   mqttPort = readUIntFromEEProm(MQTT_PORT_START);
+  int maxlen = 100;
+  char logmsg [maxlen];  
+
+  readStrFromEEProm(MQTT_SRV_START, mqttServerDNS, MQTT_SRV_MAX);
 
   if(mqttPort != UINT_MAX) {
-    readStrFromEEProm(MQTT_SRV_START, mqttServerDNS, MQTT_SRV_MAX);
-    logMessage( String("Read configuration: ") + mqttServerDNS + ":" +  mqttPort);
+    snprintf(logmsg, maxlen, "Read configuration: %s:%d", mqttServerDNS, mqttPort);
+    logMessage(logmsg);
     readBufFromEEProm(KEY_START, aesKey, KEY_LENGTH);
-    printBuffer("key: ", aesKey, KEY_LENGTH);
+    logBuffer("key: ", aesKey, KEY_LENGTH);
     return true;
   }   
   return false;
@@ -418,13 +511,19 @@ bool writeConfig(char *mqttSrv, int port, byte *key) {
   if(mqttSrv == NULL || key == NULL) {
     return false;
   } 
+
   int srvSize = strlen(mqttSrv);
-    
+  int maxlen = 100;
+  char logmsg[maxlen];
+
   if(mqttPort != 0) { 
+
     writeIntToEEProm(MQTT_PORT_START, mqttPort);
     writeStrToEEProm(MQTT_SRV_START, mqttSrv, srvSize);
     writeBufToEEProm(KEY_START, key, KEY_LENGTH);    
-    logMessage( String("Wrote configuration: ") + mqttSrv + ":" + mqttPort);
+    
+    snprintf(logmsg, maxlen, "Write configuration: %s:%d", mqttSrv, mqttPort);
+    logMessage(logmsg);
     return true;
   }
   return false;
@@ -432,11 +531,18 @@ bool writeConfig(char *mqttSrv, int port, byte *key) {
 
 
 void setMqttConfig() {
+    int maxlen = MQTT_SRV_MAX + 30;
+    char logmsg[maxlen];
+    char ipaddStr[24];
+
     if(parseServerIpAddress()) {
-      logMessage(String("Connecting to mqtt with IP address: ") + ipToStr(mqttServerIp) + ":" + mqttPort);
+      snprintf(logmsg, maxlen,"Connect mqtt @ address: %s:%d", 
+          ipToStr(mqttServerIp, ipaddStr, 24), mqttPort);
+      logMessage(logmsg);
       mqttClient.setServer(mqttServerIp, mqttPort);
     } else {
-     logMessage(String("Connecting to mqtt with domain: ") + mqttServerDNS);
+      snprintf(logmsg, maxlen, "Connect mqtt @ address: %s:%d", mqttServerDNS, mqttPort);
+      logMessage(logmsg);
       mqttClient.setServer(mqttServerDNS, mqttPort);        
     }  
 }
@@ -453,6 +559,12 @@ void initializeState() {
     } else {
       // check if IP address, if so then initiate with ip else initiate with dns.
       setMqttConfig();
+
+      byte succ = aes.set_key (aesKey, KEY_BITS);
+      if(succ != SUCCESS) {
+         logMessage("Failure setting encryption key");
+      }
+
       changeState(STATE_CONNECTING);
     }
   }
@@ -474,22 +586,27 @@ void assignState() {
 
 void configState() {
   int packetSize = udpReadPacket();
-       
+  int maxlen = MQTT_SRV_MAX + 30;
+  char logmsg[maxlen];
+
   if( packetSize > 0)  { 
       logPacket(packetSize, Udp.remoteIP(), Udp.remotePort(), rcvPacketBuffer); 
    
      if(configAgentIp == Udp.remoteIP() && packetSize > MIN_INIT_PACKET) {
-       printBuffer("rcvd config: ", rcvPacketBuffer, packetSize);     
+       logBuffer("rcvd config: ", rcvPacketBuffer, packetSize);     
        
        if(validateHeader(rcvPacketBuffer, packetSize)) { 
-          mqttPort = ((int) rcvPacketBuffer[INIT_PACKET_PORT_INDEX]) << 8 | rcvPacketBuffer[INIT_PACKET_PORT_INDEX+1];
+          mqttPort = ((int) rcvPacketBuffer[INIT_PACKET_PORT_INDEX]) << 8 
+                            | rcvPacketBuffer[INIT_PACKET_PORT_INDEX+1];
           memcpy(aesKey, &rcvPacketBuffer[INIT_PACKET_KEY_INDEX], KEY_LENGTH);
           int sizeServer = packetSize - INIT_PACKET_SERVER_INDEX;
+
           if(sizeServer > 0 && sizeServer < MQTT_SRV_MAX-1) {          
             strncpy(mqttServerDNS, &rcvPacketBuffer[INIT_PACKET_SERVER_INDEX], sizeServer);
             mqttServerDNS[sizeServer] = 0;
-            logMessage(String("server: ") + mqttServerDNS + ":" + mqttPort);
-            printBuffer("key: ", aesKey, KEY_LENGTH);
+            snprintf(logmsg, maxlen, "configured server: %s:%d", mqttServerDNS, mqttPort);
+            logMessage(logmsg);
+            logBuffer("key: ", aesKey, KEY_LENGTH);
           
             if(writeConfig(mqttServerDNS, mqttPort, aesKey)) {
                logMessage( "config completed");
@@ -502,7 +619,7 @@ void configState() {
            }
            else
            {
-             logMessage("invalid server size, < 0");
+             logMessage("invalid server size, <= 0");
              char msg[] = "invalid header received";
              resetInit(msg, sizeof(msg)); 
            }
@@ -517,18 +634,19 @@ void configState() {
 }
 
 void testMqttState() {
+  int maxlen = MQTT_SRV_MAX + 30;
+  char logmsg[maxlen];
+ 
   setMqttConfig();
 
   if(connectMqttState()) {
     sendReplyMessage(successMsg, sizeof(successMsg));
-  } else {    
-    String msg = String("failed connect: ") + mqttServerDNS + ":" + mqttPort;
-    int sz = msg.length();
-    char *msgToSend = (char *) malloc(sz);
-    msg.toCharArray(msgToSend, sz);
-    sendReplyMessage(msgToSend, sz);
-    free (msgToSend);
-  }
+ } else {
+   snprintf(logmsg, maxlen, "failed connect: %s:%d", mqttServerDNS, mqttPort);
+   int sz = strnlen(logmsg, maxlen); 
+   sendReplyMessage(logmsg, sz);
+   logMessage(logmsg);
+ }
 }
 
 bool connectMqttState() {
@@ -576,15 +694,38 @@ void loop() {
      runState();
       break;
     default:
-      String invalidState = String("invalid state: ") + currentState;
-      logMessage(invalidState);
+      logIntValue("Resetting to init, invalid state: ", currentState);
       changeState(STATE_INIT);
       break;
   }
 }
 
+
+int encryptMessagePayload(char *target, JsonObject *payload, int bufSize) {
+    char msg[MAX_ENCRYPT_SIZE];
+    // first serialize to json and encrypt payload.
+
+    int size = payload->printTo(msg, MAX_ENCRYPT_SIZE);      
+    logStrValue("unencrypted payload:", msg);
+    int encryptSize = encryptData(msg, size);
+
+    // encryptData will limit result to MAX_ENCRYPT_SIZE, will return 0 if exceeded.
+    int totalSize = encryptSize + START_ENCRYPT_DATA;
+
+    if(encryptSize > 0 && totalSize <= bufSize) {
+      //expensive to put encrypted data into json since each byte takes several char. Skipping.
+      strncpy( (char *) target, deviceId, MAX_ENCRYPT_MSG );
+      memcpy(target + START_ENCRYPT_DATA, cipherBuf, encryptSize);
+      return encryptSize + START_ENCRYPT_DATA;
+    } else {
+       logIntValue("encrypt failed, exceeded size of max encrypt:", totalSize);
+       return 0;
+    }
+}
+
+
 void handleLockMessage(char *message, int size) {
-  StaticJsonBuffer<MAX_JSON_MSG> jsonBuffer;
+  StaticJsonBuffer<JSON_5_ATTRIBUTES> jsonBuffer;
   JsonObject& msg = jsonBuffer.parseObject(message);
   
   if(!msg.success()) {
@@ -594,20 +735,20 @@ void handleLockMessage(char *message, int size) {
     bool lockState = (bool) msg["lock"];
 
     StaticJsonBuffer<JSON_OBJECT_SIZE(3)> send;
-    JsonObject& root = jsonBuffer.createObject();
-    if(lockState) {
-      root["isLocked"] = true;
-    } else {
-      root["isLocked"] = false;
-    }
+    JsonObject& lockMsg = jsonBuffer.createObject();
 
-    root["deviceId"] = deviceId;
-    char msg[256];
-    int size = root.printTo(msg, 256);
-   
-    mqttClient.publish(controlTopic, (byte*) msg, size);
-    Serial.print("sending: ");
-    Serial.println(msg);
+    if(lockState) {
+      lockMsg["locked"] = true;
+    } else {
+      lockMsg["locked"] = false;
+    }
+    lockMsg["devId"] = deviceId;
+ 
+    char encryptedMsg[MAX_ENCRYPT_MSG];
+
+    int size = encryptMessagePayload(encryptedMsg, &lockMsg, MAX_ENCRYPT_MSG);
+    mqttClient.publish(controlTopic, (byte*) encryptedMsg, size);
+    logBuffer("sending msg ", encryptedMsg, size);
   }
 }
 
@@ -620,32 +761,26 @@ void callback(char* topic, byte* payload, unsigned int length) {
   
   // Allocate the correct amount of memory for the payload copy
   if(length <= TOTAL_ENCRYPT_SZ) {
-  
+      int maxlen = 100;
+      char logmsg[maxlen];
       int bufLen = length;
-        
-      Serial.print("mqtt rcv topic:");
-      Serial.print(topic);
-      Serial.print(" size:");
-      Serial.println(length, DEC);
-      printBuffer("rcv data:", payload, length);
+      
+      snprintf(logmsg,maxlen, "mqtt rcv topic: %s size: %d", topic, length);
+      logMessage(logmsg);
+      logBuffer("rcv data:", payload, length);
       
 #ifdef ENCRYPT      
-      byte plain[bufLen];
-      byte plainSize = decryptData(payload, plain, length, bufLen); 
-      Serial.print("decrypt buf size: ");
-      Serial.println(plainSize);
-      printBuffer("decrypted data:", plain, plainSize);      
- 
-      for(int i = 0; i < plainSize; i++) {
-        Serial.print((char) plain[i]);
-      }
+      byte plain[length];
+      byte plainSize = decryptData(payload, plain, length, length); 
+
+      logIntValue("decrypt buf size: ", plainSize);
+      logBuffer("decrypted data:", plain, plainSize);      
       handleLockMessage((char*)plain, plainSize);
 #else
       handleLockMessage((char*)payload, length);
 #endif  
    } else {
-      Serial.print("message too big: ");
-      Serial.println(length);
+      logIntValue("message too big: ", length);
    }
 }
 
