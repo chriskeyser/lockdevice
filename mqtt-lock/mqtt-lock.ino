@@ -1,13 +1,14 @@
-//#include <sha256.h>
 
 #include <AES.h>
 #include <SPI.h>
 #include <Ethernet.h>
 #include <EEPROM.h>
 #include <EthernetUdp.h>
+#include <sha256.h>
 
 #define UDP_TX_PACKET_MAX_SIZE 144
 #include <PubSubClient.h>
+#define MQTT_MAX_PACKET_SIZE 255
 #include <avr/pgmspace.h>
 #include <string.h>
 #include <stdlib.h>
@@ -30,14 +31,16 @@
 #define MAX_IP_STR_LEN    16
 
 //encryption defines.  SAMPLE_PIN is an unconnected analog pin...
+#define SHA256_LENGTH     32
 #define KEY_LENGTH        16
 #define KEY_BITS          128
 #define SAMPLE_PIN        15      
-#define MAX_ENCRYPT_SIZE  (10*N_BLOCK)-1
+#define MAX_ENCRYPT_DATA_SIZE  (10*N_BLOCK)-1
 #define TOTAL_ENCRYPT_SZ  11*N_BLOCK
 #define ENCRYPT
 #define START_ENCRYPT_DATA 24
 #define MAX_ENCRYPT_MSG   START_ENCRYPT_DATA + TOTAL_ENCRYPT_SZ
+#define MAX_TOTAL_MSG     MAX_ENCRYPT_MSG + SHA256_LENGTH
 #define EIV
 
 // EEPROM locations
@@ -68,11 +71,12 @@ char mqttServerDNS[MQTT_SRV_MAX+1];
 unsigned int mqttPort;
 byte currentState=STATE_INIT;
 
-// encryption globals
+// encryption and signing globals
 AES aes;
+
 byte aesKey[KEY_LENGTH];
-byte cipherBuf[TOTAL_ENCRYPT_SZ];
-byte plainTextBuf[TOTAL_ENCRYPT_SZ];
+byte cipherBuf[MAX_TOTAL_MSG];
+byte plainTextBuf[MAX_TOTAL_MSG];
 
 // Callback function header
 void callback(char* topic, byte* payload, unsigned int length);
@@ -83,11 +87,11 @@ EthernetUDP Udp;
 
 // initialization constants
 #define SIGLEN 5
-const char initSig[] = "LINIT";
-const char initReplySig[] = "LRPLY";
-const char resetSig[] = "RST";
+const char initSig[] PROGMEM = "LINIT";
+const char initReplySig[] PROGMEM = "LRPLY";
+const char resetSig[] PROGMEM =  "RST";
 char deviceId[] = "lock-00AABBCC1E02"; // typically would be read from register
-const char successMsg[] = "success";
+const char successMsg[] PROGMEM = "success";
 
 // positions for fixed init msg
 // size of signature + state + port + encryption key + string for domain or ip.
@@ -105,18 +109,18 @@ IPAddress myip(0, 0, 0, 0);
 #define LOCK_RESPONSE 2
 #define LOCK_OPERATION 3
 #define JSON_5_ATTRIBUTES   JSON_OBJECT_SIZE(5)
+
 char controlTopic[] = "lockctl";
 PubSubClient mqttClient(server, 1883, callback, ethClient);
 
 //JSON processing
-
 
 /**** End Declarations ************
 
 /************
 * Functions for writing debug information out serial port.
 */
-char *ipToStr(IPAddress addr, char *target, int maxlen) {
+char *ipToStr(const IPAddress addr, char *target, const int maxlen) {
   if(addr != NULL) {
     snprintf(target, maxlen, "%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3]);
   } else {
@@ -126,26 +130,26 @@ char *ipToStr(IPAddress addr, char *target, int maxlen) {
   return target;
 }
 
-void printIP(IPAddress addr) {
+void printIP(const IPAddress addr) {
   char ipStr[24]; 
   Serial.print(ipToStr(addr, ipStr, 24));
 }
 
-void logMessage(char *msg) {
+void logMessage(const char *msg) {
   Serial.println(msg);
 }
 
-void logIntValue(char *msg, int value) {
+void logIntValue(const char *msg, const int value) {
    Serial.print(msg);
    Serial.println(value);
 }
 
-void logStrValue(char *msg, char *value) {
+void logStrValue(const char *msg, const char *value) {
   Serial.print(msg);
   Serial.println(value);
 }
 
-void logBuffer(char *title, void *data, int bufLength) {
+void logBuffer(const char *title, const void *data, const int bufLength) {
   Serial.print(title);
   Serial.print("size:");
   Serial.print(bufLength);
@@ -159,7 +163,7 @@ void logBuffer(char *title, void *data, int bufLength) {
   Serial.println();
 }
 
-void logPacket(int packetSize, IPAddress addr, int port, char * data)
+void logPacket(const int packetSize, const IPAddress addr, const int port, const char * data)
 {
   char ipaddrStr[24];
 
@@ -188,7 +192,7 @@ bool getDhcpAddr() {
   return true;
 }
 
-void udpSendPacket(IPAddress dest, int port, char *data, int len) {
+void udpSendPacket(const IPAddress dest, const int port, const char *data, const int len) {
   Udp.beginPacket(dest, port);
   Udp.write(data, len);
   Udp.endPacket();
@@ -205,7 +209,7 @@ int udpReadPacket() {
 /************
 * Functions for managing state.
 */
-void changeState(byte newState) {
+void changeState(const byte newState) {
   int maxlen = 100;
   char logMsg[maxlen];
 
@@ -218,7 +222,7 @@ int getState() {
   return currentState;
 }
 
-void resetInit(const char *msg, int len) {
+void resetInit(const char *msg, const int len) {
   changeState(STATE_ASSIGNING);
   
   if(msg == NULL) {
@@ -231,11 +235,11 @@ void resetInit(const char *msg, int len) {
 /**********************
   functions for working with EEPROM
 */
-bool writeStrToEEProm(int start, char *data, byte dataSize) {
-  writeBufToEEProm(start, (void *) data, dataSize);
+bool writeStrToEEProm(const int start, const char *data, const byte dataSize) {
+  writeBufToEEProm(start, (const void *) data, dataSize);
 }
 
-bool writeBufToEEProm(int start, void *data, byte dataSize) {
+bool writeBufToEEProm(const int start, const void *data, const byte dataSize) {
   if(dataSize > MAX_BUF_WRITE) {
     logMessage("attempt to write value to EEProm greatner than max buffer bytes");
     return false;
@@ -243,7 +247,7 @@ bool writeBufToEEProm(int start, void *data, byte dataSize) {
   
   EEPROM.write(start, dataSize);
   int curPos = start + 1;
-  byte *buf = (byte *) data;
+  const byte *buf = (const byte *) data;
   
   for(byte i = 0; i < dataSize; i++)  {
     EEPROM.write(curPos++, buf[i]);
@@ -252,7 +256,7 @@ bool writeBufToEEProm(int start, void *data, byte dataSize) {
   return true;
 }
 
-bool readStrFromEEProm(unsigned int start, char *data, byte maxSize) {
+bool readStrFromEEProm(const unsigned int start, char *data, const byte maxSize) {
   byte bytesRead = readBufFromEEProm(start, (byte *) data, maxSize - 1);
   if(bytesRead > 0) {    // make sure zero terminated.
     data[bytesRead] = 0;
@@ -261,7 +265,7 @@ bool readStrFromEEProm(unsigned int start, char *data, byte maxSize) {
   return bytesRead > 0;
 }
 
-byte readBufFromEEProm(unsigned int start, byte *data, byte maxSize) {
+byte readBufFromEEProm(const unsigned int start, byte *data, const byte maxSize) {
   int maxlen = 100;
   char logmsg[maxlen];
 
@@ -286,14 +290,14 @@ byte readBufFromEEProm(unsigned int start, byte *data, byte maxSize) {
   return bufSize;
 }
 
-void writeIntToEEProm(unsigned int start, unsigned int val) {
+void writeIntToEEProm(const unsigned int start, const unsigned int val) {
   byte hi = (byte) (val >> 8);
   byte lo = (byte) val;
   EEPROM.write(start, hi);
   EEPROM.write(start+1, lo);
 }
 
-unsigned int readUIntFromEEProm(int start) {
+unsigned int readUIntFromEEProm(const int start) {
   unsigned int result;
   byte hi = EEPROM.read(start);
   byte lo = EEPROM.read(start+1);
@@ -307,117 +311,193 @@ unsigned int readUIntFromEEProm(int start) {
 *  Functions for encrypting data
 ***/
 
-void generateRandom(byte *buf, int len) {
+void generateRandom(byte *buf, const int len) {
   for(int i = 0; i < len; i++) {
     buf[i] = (byte) random(UCHAR_MAX);
   }
 }
 
-int encryptData(void *data, byte dataSize){
+
+void padPKCS5(byte *buffer, const int sz, const int encryptSize) {
+
+  // PKCS5 padding method.
+  int paddingSize = N_BLOCK-(sz % N_BLOCK);
+  int start = encryptSize - paddingSize;
+
+  for(int i = start; i < encryptSize; i++) {
+    plainTextBuf[i] = paddingSize;
+  }
+}
+
+byte *getSha256Hmac(byte *buffer, const int msgSize) {
+  Sha256.initHmac(aesKey, KEY_LENGTH);
+
+  for(int i = 0; i < msgSize; i++) {
+    Sha256.write(buffer[i]);
+  }
+  
+  return Sha256.resultHmac();
+
+
+}
+
+int signAndAppendSha256Hmac(byte *buffer, const int msgSize, const int bufferSize) {
+  int remaining = bufferSize-msgSize;
+
+  if(remaining < SHA256_LENGTH) {
+    logIntValue("signature exceeds space remaining:", remaining);
+    return 0; 
+  }
+  
+  byte *sha256Hmac = getSha256Hmac(buffer, msgSize);
+
+  logBuffer("256 HMAC: ", sha256Hmac, SHA256_LENGTH);
+  memcpy(buffer + msgSize, sha256Hmac, SHA256_LENGTH);
+
+  return msgSize + SHA256_LENGTH;
+}
+
+int encryptDataEIV(const void *data, const byte dataSize){
   byte iv[N_BLOCK];  
   int encryptSize = 0;
 
-  byte setKeyResult = aes.set_key (aesKey, KEY_BITS);
-  
-  if(setKeyResult != SUCCESS) {
-     logMessage("failed on init key");
-     return 0;
-   }
-
-  if(dataSize > MAX_ENCRYPT_SIZE) {
+  if(dataSize >MAX_ENCRYPT_DATA_SIZE ) {
     logIntValue("encrypt max blk size exceeded: ", dataSize);
     return 0;
   }
 
   byte sz = dataSize + 1;
 
-#ifdef EIV
   int blocks = (sz / N_BLOCK) + 1;
-#else
-  int blocks = sz / N_BLOCK;
-#endif
 
-  if(sz % N_BLOCK > 0) {
-    blocks++;
-  }
+  if(sz % N_BLOCK > 0) { blocks++; }
 
   encryptSize = blocks * N_BLOCK;
 
-  logIntValue("No blocks encrypting:", blocks+1);
-  logIntValue("data size: ", sz);
+  logIntValue("Blocks encrypting:", blocks+1);
+  logIntValue("Data size: ", sz);
   
-  generateRandom(iv, N_BLOCK);
-  generateRandom(plainTextBuf, N_BLOCK);
+  generateRandom(iv, N_BLOCK);              // generate an iv
   logBuffer("iv:", iv, N_BLOCK);
+  padPKCS5(plainTextBuf, sz, encryptSize);  // set unused bytes to pad value.
 
-#ifdef EIV
-  //Explicit Initialization Vector (discard 1st block)
+  //Explicit Initialization Vector (discard 1st block),  put in random data
+  generateRandom(plainTextBuf, N_BLOCK);    
   
   plainTextBuf[N_BLOCK] = dataSize;
   memcpy(&plainTextBuf[N_BLOCK+1], data, dataSize);
-
-  // PKCS5 padding method.
-  byte paddingSize = N_BLOCK-(sz % N_BLOCK);
-  for(int i = dataSize+N_BLOCK+1; i < encryptSize; i++) {
-    plainTextBuf[i] = paddingSize;
-  }
-
   logBuffer("plaintext: ", plainTextBuf, encryptSize);
   byte succ = aes.cbc_encrypt(plainTextBuf, cipherBuf, blocks, iv);
-#else
-  // going to put iv at the start of the buffer instead of using EIV
-  plainTextBuf[0] = dataSize;
-  memcpy(&plainTextBuf[1], data, dataSize); 
-  byte succ = aes.cbc_encrypt(plainTextBuf, &cipherBuf[N_BLOCK], blocks, iv);  
-  memcpy(cipherBuf, iv, N_BLOCK);
-  encryptSize += N_BLOCK;
-#endif
+  
   logIntValue("Encrypt size:", encryptSize);
-  logBuffer("Encrypted:", cipherBuf, encryptSize);
   
   if(succ == SUCCESS) {
-    logMessage("done encryption");
-    return encryptSize;
+    int totalSize = signAndAppendSha256Hmac(cipherBuf, encryptSize, MAX_TOTAL_MSG);
+    logIntValue("signed size:", totalSize);
+    if(totalSize > 0) {   
+      logBuffer("Signed message: ", cipherBuf, totalSize);
+      return totalSize;
+    } else {
+      logMessage("Signing failed with encrypt operation");
+      return 0;
+    }
   } else {
     logMessage("Failed on encrypt operation");
     return 0;
   }
 }
 
-byte decryptData(byte *cipher, byte *decrypted, int size, int bufsize) {
+int encryptDataSendIV(const void *data, const byte dataSize){
+  byte iv[N_BLOCK];  
+  int encryptSize = 0;
+
+  if(dataSize > MAX_ENCRYPT_DATA_SIZE) {
+    logIntValue("encrypt max blk size exceeded: ", dataSize);
+    return 0;
+  }
+
+  byte sz = dataSize + 1;
+  int blocks = sz / N_BLOCK;
+
+  if(sz % N_BLOCK > 0) { blocks++; }
+  encryptSize = blocks * N_BLOCK;
+
+  logIntValue("Blocks encrypting:", blocks+1);
+  logIntValue("Data size: ", sz);
+  
+  generateRandom(iv, N_BLOCK);              // generate an iv
+  logBuffer("iv:", iv, N_BLOCK);
+  padPKCS5(plainTextBuf, sz, encryptSize);  // set unused bytes to pad value.
+
+  plainTextBuf[0] = dataSize;
+  memcpy(&plainTextBuf[1], data, dataSize); 
+  byte succ = aes.cbc_encrypt(plainTextBuf, &cipherBuf[N_BLOCK], blocks, iv);  
+  memcpy(cipherBuf, iv, N_BLOCK);
+  encryptSize += N_BLOCK;
+
+  logIntValue("Encrypt size:", encryptSize);
+  
+  if(succ == SUCCESS) {
+    int totalSize = signAndAppendSha256Hmac(cipherBuf, encryptSize, MAX_TOTAL_MSG);
+    if(totalSize > 0) {   
+      logBuffer("Signed message: ", cipherBuf, totalSize);
+      return totalSize;
+    } else {
+      logMessage("Signing failed with encrypt operation");
+      return 0;
+    }
+  } else {
+    logMessage("Failed on encrypt operation");
+    return 0;
+  }
+}
+
+
+
+byte decryptData(byte *cipher, byte *decrypted, const int totalsize, const int bufsize) {
   byte iv[N_BLOCK];
+  int size = totalsize -  SHA256_LENGTH;
   int blocks = size / N_BLOCK;
   byte datasize = 0;
   int maxlen = 100;
   char logmsg [maxlen];
- 
+  logIntValue("encrypt size: ", size);
+
   if(size % N_BLOCK > 0) {
     logIntValue("warning: invalid size decrypted buffer:", size);
     return 0;
   }
- 
-  logIntValue(" number of blocks: ", blocks);
-
-  // iv doesn't matter since using EIV
-  if(aes.cbc_decrypt(cipher, plainTextBuf, blocks, iv) == FAILURE) {
-    logMessage("failure on decrypt");
-  } else {
-    logMessage("decrypted");
-    logBuffer("decrypted: ", plainTextBuf, size);
-    logMessage((char*) plainTextBuf);
-
-    datasize = plainTextBuf[N_BLOCK];
   
-    if( bufsize < datasize) {
-      snprintf(logmsg, maxlen, "decrypt: buf size: %d too small data size: %d", bufsize, datasize);
-      logMessage(logmsg);
-      return 0;
+  byte *sig = getSha256Hmac(cipher, size);
+  if(memcmp(sig, &cipher[size], SHA256_LENGTH) == 0) {
+  
+
+    logIntValue(" number of blocks: ", blocks);
+
+    // iv doesn't matter since using EIV
+    if(aes.cbc_decrypt(cipher, plainTextBuf, blocks, iv) == FAILURE) {
+      logMessage("failure on decrypt");
+    } else {
+      logMessage("decrypted");
+      logBuffer("decrypted: ", plainTextBuf, size);
+      logMessage((char*) plainTextBuf);
+
+      datasize = plainTextBuf[N_BLOCK];
+    
+      if( bufsize < datasize) {
+        snprintf(logmsg, maxlen, "decrypt: bufsize: %d too small size: %d", bufsize, datasize);
+        logMessage(logmsg);
+        return 0;
+      }
+
+      memcpy(decrypted, &plainTextBuf[N_BLOCK+1], datasize);  
+      return datasize;
     }
-
-    memcpy(decrypted, &plainTextBuf[N_BLOCK+1], datasize);
+  } else {
+     logMessage("Signature mismatch");
+     logBuffer("msg: ", &cipher[size], SHA256_LENGTH);
+     logBuffer("calc:", sig, SHA256_LENGTH);
   }
-
-  return datasize;
 }
 
 
@@ -425,7 +505,7 @@ byte decryptData(byte *cipher, byte *decrypted, int size, int bufsize) {
 /************
 * Functions to help with packet parsing, validation and creation
 ****/
-bool validateHeader(char *buf, int buflen) {
+bool validateHeader(const char *buf, const int buflen) {
   int sigSize = strlen(initSig);
   int maxlen = 100;
   char logmsg[maxlen];
@@ -507,7 +587,7 @@ bool readConfig() {
   return false;
 }
 
-bool writeConfig(char *mqttSrv, int port, byte *key) {
+bool writeConfig(const char *mqttSrv, const int port, const byte *key) {
   if(mqttSrv == NULL || key == NULL) {
     return false;
   } 
@@ -560,7 +640,7 @@ void initializeState() {
       // check if IP address, if so then initiate with ip else initiate with dns.
       setMqttConfig();
 
-      byte succ = aes.set_key (aesKey, KEY_BITS);
+      byte succ = aes.set_key (aesKey, KEY_BITS);     
       if(succ != SUCCESS) {
          logMessage("Failure setting encryption key");
       }
@@ -701,22 +781,22 @@ void loop() {
 }
 
 
-int encryptMessagePayload(char *target, JsonObject *payload, int bufSize) {
-    char msg[MAX_ENCRYPT_SIZE];
+int encryptMessagePayload(char *target, const char *payload, const int bufSize) {
+    int size = strlen(payload);
+
     // first serialize to json and encrypt payload.
+    logStrValue("unencrypted payload:", payload);
 
-    int size = payload->printTo(msg, MAX_ENCRYPT_SIZE);      
-    logStrValue("unencrypted payload:", msg);
-    int encryptSize = encryptData(msg, size);
+    int encryptSize = encryptDataEIV(payload, size);
 
-    // encryptData will limit result to MAX_ENCRYPT_SIZE, will return 0 if exceeded.
+    // encryptData will limit result to MAX_ENCRYPT_DATA_SIZE, will return 0 if exceeded.
     int totalSize = encryptSize + START_ENCRYPT_DATA;
 
     if(encryptSize > 0 && totalSize <= bufSize) {
       //expensive to put encrypted data into json since each byte takes several char. Skipping.
       strncpy( (char *) target, deviceId, MAX_ENCRYPT_MSG );
       memcpy(target + START_ENCRYPT_DATA, cipherBuf, encryptSize);
-      return encryptSize + START_ENCRYPT_DATA;
+      return totalSize;
     } else {
        logIntValue("encrypt failed, exceeded size of max encrypt:", totalSize);
        return 0;
@@ -724,31 +804,34 @@ int encryptMessagePayload(char *target, JsonObject *payload, int bufSize) {
 }
 
 
-void handleLockMessage(char *message, int size) {
+void handleLockMessage(char *message, const int size) {
   StaticJsonBuffer<JSON_5_ATTRIBUTES> jsonBuffer;
   JsonObject& msg = jsonBuffer.parseObject(message);
-  
+  char lockMsg[MAX_ENCRYPT_DATA_SIZE];
+  char encryptedMsg[MAX_ENCRYPT_MSG];
+  int guard = 0xF0F0;
+
   if(!msg.success()) {
     logMessage("failed to parse json");
   } else {
     msg.printTo(Serial);
     bool lockState = (bool) msg["lock"];
 
-    StaticJsonBuffer<JSON_OBJECT_SIZE(3)> send;
-    JsonObject& lockMsg = jsonBuffer.createObject();
-
     if(lockState) {
-      lockMsg["locked"] = true;
+       snprintf(lockMsg, MAX_ENCRYPT_DATA_SIZE, "{\"locked\":true, \"devId\":\"%s\"}", deviceId);
     } else {
-      lockMsg["locked"] = false;
+       snprintf(lockMsg, MAX_ENCRYPT_DATA_SIZE, "{\"locked\":false, \"devId\":\"%s\"}", deviceId);
     }
-    lockMsg["devId"] = deviceId;
- 
-    char encryptedMsg[MAX_ENCRYPT_MSG];
 
-    int size = encryptMessagePayload(encryptedMsg, &lockMsg, MAX_ENCRYPT_MSG);
+
+    int size = encryptMessagePayload(encryptedMsg, lockMsg, MAX_ENCRYPT_MSG);
     mqttClient.publish(controlTopic, (byte*) encryptedMsg, size);
-    logBuffer("sending msg ", encryptedMsg, size);
+    logBuffer("ending msg ", encryptedMsg, size);
+  }
+  if(guard != 0xF0F0) {
+    logMessage("stack overrun");
+  }else {
+    logMessage("exiting handleLockMessage");
   }
 }
 
