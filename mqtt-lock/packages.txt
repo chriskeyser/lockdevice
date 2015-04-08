@@ -3,3 +3,11 @@ Arduino: http://arduino.cc/en/Guide/Windows#toc2, using 1.6.1
 JSON: https://github.com/bblanchon/ArduinoJson/wiki/Using%20the%20library%20with%20Arduino
 AES: http://forum.arduino.cc/index.php?topic=88890.0, http://utter.chaos.org.uk/~markt/AES-library.zip
 SHA256: https://github.com/Cathedrow/Cryptosuite.  Had to fix up print overloads for a few of the items.
+
+Updates
+- Fixed SHA256 compile errors
+- Updated PubSubClient package size
+- Updated PubSubClient to support setting server/port after running.  For some reason there was an initialization issue that I could not run down
+                    after creating the client, and could not connect to mqtt client.
+
+
