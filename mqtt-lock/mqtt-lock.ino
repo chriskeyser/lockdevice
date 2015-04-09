@@ -49,7 +49,7 @@ did compile properly on 1.6.1.
 // max ip lengths.
 #define MAX_IP_STR_LEN    16
 
-//encryption defines.  SAMPLE_PIN is an unconnected analog pin...
+//encryption defines.  SAMPLE_PIN is an unconnected analog pin for random init...
 #define SHA256_LENGTH     32
 #define KEY_LENGTH        16
 #define KEY_BITS          128
@@ -73,55 +73,61 @@ did compile properly on 1.6.1.
 #define END_CONFIG        START_CONFIG + CONFIG_LENGTH
 #define MAX_BUF_WRITE     254
 
+#define MQTT_LAST_TIMESTAMP END_CONFIG + 1
+
 // shared buffers to use.
-char rcvPacketBuffer[UDP_TX_PACKET_MAX_SIZE+1];
-char txPacketBuffer[UDP_TX_PACKET_MAX_SIZE+1];
+char g_rcvPacketBuffer[UDP_TX_PACKET_MAX_SIZE+1];
+char g_txPacketBuffer[UDP_TX_PACKET_MAX_SIZE+1];
 
 // This would normally need to be read from a board setting rather than hardcoding.
-byte mac[] = {
+byte g_mac[] = {
   0x00, 0xAA, 0xBB, 0xCC, 0x1E, 0x02
 };
 
 // global variables.
-IPAddress myIp;
-IPAddress configAgentIp;
-byte mqttServerIp[4];
-char mqttServerDNS[MQTT_SRV_MAX+1];
-unsigned int mqttPort;
-byte currentState=STATE_INIT;
+IPAddress g_myIp;
+IPAddress g_configAgentIp;
+byte g_mqttServerIp[4];
+char g_mqttServerDNS[MQTT_SRV_MAX+1];
+uint16_t g_mqttPort;
+uint32_t g_lastMsgSequence;
+byte g_currentState=STATE_INIT;
+bool g_debug = true;
 
 // encryption and signing globals
-AES aes;
+AES g_aes;
 
-byte aesKey[KEY_LENGTH];
-byte cipherBuf[MAX_TOTAL_MSG];
-byte plainTextBuf[MAX_TOTAL_MSG];
+byte g_aesKey[KEY_LENGTH];
+byte g_cipherBuf[MAX_TOTAL_MSG];
+byte g_plainTextBuf[MAX_TOTAL_MSG];
 
 // Callback function header
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
 // various clients to use in processing...
-EthernetClient ethClient;
-EthernetUDP Udp;
+EthernetClient g_ethClient;
+EthernetUDP g_Udp;
 
 // initialization constants
-const char initSig[] PROGMEM = "LINIT";
-const char initReplySig[] PROGMEM = "LRPLY";
-const char resetSig[] PROGMEM =  "RST";
-char deviceId[] = "lock-00AABBCC1E02"; // typically would be read from register
-const char successMsg[] PROGMEM = "success";
+const char initSig[] = "LINIT";
+const char initReplySig[] = "LRPLY";
+const char resetSig[] =  "RST";
+const char successMsg[] = "success";
+char g_lockId[] = "lock-00AABBCC1E02"; // typically would be read from register
 
 // positions for fixed init msg
 // size of signature + state + port + encryption key + string for domain or ip.
-#define SIGLEN                   sizeof(initSig)
-#define MIN_INIT_PACKET          SIGLEN + sizeof(byte) + sizeof(unsigned int) + KEY_LENGTH + 6
-#define INIT_PACKET_PORT_INDEX   SIGLEN + sizeof(byte)
-#define INIT_PACKET_KEY_INDEX    INIT_PACKET_PORT_INDEX + sizeof(unsigned int)
-#define INIT_PACKET_SERVER_INDEX INIT_PACKET_KEY_INDEX + KEY_LENGTH
+// take off one as we don't include terminating char.
+#define SIGLEN                    sizeof(initSig) - 1
+#define MIN_INIT_PACKET           SIGLEN + sizeof(byte) + sizeof(unsigned int) + KEY_LENGTH + 6
+#define INIT_PACKET_PORT_INDEX    SIGLEN + sizeof(byte)
+#define INIT_PACKET_COUNTER_INDEX INIT_PACKET_PORT_INDEX + sizeof(uint16_t)
+#define INIT_PACKET_KEY_INDEX     INIT_PACKET_COUNTER_INDEX + sizeof(uint32_t)
+#define INIT_PACKET_SERVER_INDEX  INIT_PACKET_KEY_INDEX + KEY_LENGTH
 
 // IP addresses
-byte server[] = { 0, 0, 0, 0 }; 
-IPAddress myip(0, 0, 0, 0);
+byte g_server[] = { 0, 0, 0, 0 }; 
+IPAddress g_myip(0, 0, 0, 0);
 
 // MQTT defines
 #define LOCK_CHALLENGE 1
@@ -130,7 +136,7 @@ IPAddress myip(0, 0, 0, 0);
 #define JSON_5_ATTRIBUTES   JSON_OBJECT_SIZE(5)
 
 char controlTopic[] = "lockctl";
-PubSubClient mqttClient(server, 1883, mqttCallback, ethClient);
+PubSubClient mqttClient(g_server, 1883, mqttCallback, g_ethClient);
 
 //JSON processing
 
@@ -150,49 +156,59 @@ char *ipToStr(const IPAddress addr, char *target, const int maxlen) {
 }
 
 void printIP(const IPAddress addr) {
-  char ipStr[24]; 
-  Serial.print(ipToStr(addr, ipStr, 24));
+  if(g_debug) {
+    char ipStr[24]; 
+    Serial.print(ipToStr(addr, ipStr, 24));
+  }
 }
 
 void logMessage(const char *msg) {
-  Serial.println(msg);
+  if(g_debug) {Serial.println(msg);}
 }
 
 void logIntValue(const char *msg, const int value) {
-   Serial.print(msg);
-   Serial.println(value);
+  if(g_debug) {
+    Serial.print(msg);
+    Serial.println(value);
+  }
 }
 
 void logStrValue(const char *msg, const char *value) {
-  Serial.print(msg);
-  Serial.println(value);
+  if(g_debug) {
+    Serial.print(msg);
+    Serial.println(value);
+  }
 }
 
 void logBuffer(const char *title, const void *data, const int bufLength) {
-  Serial.print(title);
-  Serial.print("size:");
-  Serial.print(bufLength);
-  Serial.print(" data:");
-  byte *bytes = (byte *) data;
-  
-  for(int i = 0; i < bufLength; i++) {
-    Serial.print(bytes[i]);
-    Serial.print(" ");
+  if(g_debug) {
+    Serial.print(title);
+    Serial.print("size:");
+    Serial.print(bufLength);
+    Serial.print(" data:");
+    byte *bytes = (byte *) data;
+    
+    for(int i = 0; i < bufLength; i++) {
+      Serial.print(bytes[i]);
+      Serial.print(" ");
+    }
+    Serial.println();
   }
-  Serial.println();
 }
 
 void logPacket(const int packetSize, const IPAddress addr, const int port, const char * data)
 {
-  char ipaddrStr[24];
+  if(g_debug) {
+    char ipaddrStr[24];
 
-  Serial.print("Udp rcv: ");
-  Serial.print(packetSize);
-  Serial.print( " bytes from: ");
-  Serial.print(ipToStr(addr, ipaddrStr, 24));
-  Serial.print(":");
-  Serial.print(port);
-  logBuffer("data", data, packetSize);
+    Serial.print("g_Udp rcv: ");
+    Serial.print(packetSize);
+    Serial.print( " bytes from: ");
+    Serial.print(ipToStr(addr, ipaddrStr, 24));
+    Serial.print(":");
+    Serial.print(port);
+    logBuffer("data", data, packetSize);
+  }
 }
 
 /************
@@ -201,26 +217,26 @@ void logPacket(const int packetSize, const IPAddress addr, const int port, const
 bool getDhcpAddr() {
   char ipaddrStr[24];
 
-  if(Ethernet.begin(mac) == 0) {
+  if(Ethernet.begin(g_mac) == 0) {
     logMessage("Failed to configure Ethernet using DHCP");
     return false;
   }
   
-  myIp = Ethernet.localIP();
-  logStrValue("My IP address: ", ipToStr(myIp, ipaddrStr, 24));
+  g_myIp = Ethernet.localIP();
+  logStrValue("My IP address: ", ipToStr(g_myIp, ipaddrStr, 24));
   return true;
 }
 
 void udpSendPacket(const IPAddress dest, const int port, const char *data, const int len) {
-  Udp.beginPacket(dest, port);
-  Udp.write(data, len);
-  Udp.endPacket();
+  g_Udp.beginPacket(dest, port);
+  g_Udp.write(data, len);
+  g_Udp.endPacket();
 }
 
 int udpReadPacket() {
-    int packetSize = Udp.parsePacket();   
+    int packetSize = g_Udp.parsePacket();   
     if(packetSize > 0) {
-      Udp.read(rcvPacketBuffer,UDP_TX_PACKET_MAX_SIZE);
+      g_Udp.read(g_rcvPacketBuffer,UDP_TX_PACKET_MAX_SIZE);
     }
     return packetSize;
 }
@@ -232,13 +248,13 @@ void changeState(const byte newState) {
   int maxlen = 100;
   char logMsg[maxlen];
 
-  snprintf(logMsg, maxlen, "changing state from: %d to %d", currentState,newState);
+  snprintf(logMsg, maxlen, "changing state from: %d to %d", g_currentState,newState);
   logMessage(logMsg);
-  currentState = newState;
+  g_currentState = newState;
 }
 
 int getState() {
-  return currentState;
+  return g_currentState;
 }
 
 void resetInit(const char *msg, const int len) {
@@ -254,11 +270,23 @@ void resetInit(const char *msg, const int len) {
 /**********************
   functions for working with EEPROM
 */
-bool writeStrToEEProm(const int start, const char *data, const byte dataSize) {
+bool writeStrToEEProm(int start, const char *data, const byte dataSize) {
   writeBufToEEProm(start, (const void *) data, dataSize);
 }
 
-bool writeBufToEEProm(const int start, const void *data, const byte dataSize) {
+void writeUIntToEEProm(int start, const uint16_t val) {
+  EEPROM.write(start, (byte)(val >> 8));
+  EEPROM.write(start+1, (byte) val);
+}
+
+void writeULongToEEProm(int start, const uint32_t val) {
+  EEPROM.write(start, (byte)(val >> 24));
+  EEPROM.write(start+1, (byte)(val >> 16));
+  EEPROM.write(start+2, (byte)(val >> 8));
+  EEPROM.write(start+3, (byte)(val));
+}
+
+bool writeBufToEEProm(int start, const void *data, const byte dataSize) {
   if(dataSize > MAX_BUF_WRITE) {
     logMessage("attempt to write value to EEProm greatner than max buffer bytes");
     return false;
@@ -275,7 +303,7 @@ bool writeBufToEEProm(const int start, const void *data, const byte dataSize) {
   return true;
 }
 
-bool readStrFromEEProm(const unsigned int start, char *data, const byte maxSize) {
+bool readStrFromEEProm(int start, char *data, const byte maxSize) {
   byte bytesRead = readBufFromEEProm(start, (byte *) data, maxSize - 1);
   if(bytesRead > 0) {    // make sure zero terminated.
     data[bytesRead] = 0;
@@ -284,7 +312,7 @@ bool readStrFromEEProm(const unsigned int start, char *data, const byte maxSize)
   return bytesRead > 0;
 }
 
-byte readBufFromEEProm(const unsigned int start, byte *data, const byte maxSize) {
+byte readBufFromEEProm(int start, byte *data, const byte maxSize) {
   int maxlen = 100;
   char logmsg[maxlen];
 
@@ -309,22 +337,22 @@ byte readBufFromEEProm(const unsigned int start, byte *data, const byte maxSize)
   return bufSize;
 }
 
-void writeIntToEEProm(const unsigned int start, const unsigned int val) {
-  byte hi = (byte) (val >> 8);
-  byte lo = (byte) val;
-  EEPROM.write(start, hi);
-  EEPROM.write(start+1, lo);
-}
-
-unsigned int readUIntFromEEProm(const int start) {
-  unsigned int result;
-  byte hi = EEPROM.read(start);
-  byte lo = EEPROM.read(start+1);
-  result = hi;
-  result <<= 8;
-  result |= lo;
+uint16_t readUIntFromEEProm(const int start) { 
+  uint16_t result;
+  result = ((uint16_t) EEPROM.read(start)) << 8;
+  result |= EEPROM.read(start+1);
   return result;
 }
+
+uint32_t readULongFromEEProm(const unsigned int start) {
+  uint32_t result;
+  result = ((uint32_t) EEPROM.read(start)) << 24;
+  result |= ((uint32_t) EEPROM.read(start+1)) << 16;
+  result |= ((uint32_t) EEPROM.read(start+2)) << 8;
+  result |= EEPROM.read(start+3);
+  return result;
+}
+
 
 /***********
 *  Functions for encrypting data
@@ -359,14 +387,14 @@ int padPKCS5(byte *buffer, const int sz) {
   }
 
   for(int i = start; i < (blocks * N_BLOCK); i++) {
-    plainTextBuf[i] = paddingVal;
+    g_plainTextBuf[i] = paddingVal;
   }
 
   return blocks;
 }
 
 byte *getSha256Hmac(byte *buffer, const int msgSize) {
-  Sha256.initHmac(aesKey, KEY_LENGTH);
+  Sha256.initHmac(g_aesKey, KEY_LENGTH);
 
   for(int i = 0; i < msgSize; i++) {
     Sha256.write(buffer[i]);
@@ -408,13 +436,13 @@ int encryptDataEIV(const void *data, const byte dataSize){
   byte sz = dataSize + 1;
 
   //Explicit Initialization Vector (discard 1st block),  put in random data
-  generateRandom(plainTextBuf, N_BLOCK); 
-  plainTextBuf[N_BLOCK] = dataSize;
-  memcpy(&plainTextBuf[N_BLOCK+1], data, dataSize);
+  generateRandom(g_plainTextBuf, N_BLOCK); 
+  g_plainTextBuf[N_BLOCK] = dataSize;
+  memcpy(&g_plainTextBuf[N_BLOCK+1], data, dataSize);
 
   int msgSize = N_BLOCK + sz;   // account for throw away first block...
  
-  int blocks = padPKCS5(plainTextBuf, msgSize);
+  int blocks = padPKCS5(g_plainTextBuf, msgSize);
   encryptSize = blocks * N_BLOCK;
 
   logIntValue("Blocks encrypting:", blocks);
@@ -424,9 +452,9 @@ int encryptDataEIV(const void *data, const byte dataSize){
   generateRandom(iv, N_BLOCK);              // generate an iv
   logBuffer("iv:", iv, N_BLOCK);
 
-  logBuffer("plaintext: ", plainTextBuf, encryptSize);
+  logBuffer("plaintext: ", g_plainTextBuf, encryptSize);
 
-  byte succ = aes.cbc_encrypt(plainTextBuf, cipherBuf, blocks, iv);
+  byte succ = g_aes.cbc_encrypt(g_plainTextBuf, g_cipherBuf, blocks, iv);
   
   if(succ == SUCCESS) {
     return encryptSize;
@@ -453,14 +481,14 @@ byte decryptData(byte *cipher, byte *decrypted, const int size, const int bufsiz
   logIntValue(" number of blocks: ", blocks);
 
   // iv doesn't matter since using EIV
-  if(aes.cbc_decrypt(cipher, plainTextBuf, blocks, iv) == FAILURE) {
+  if(g_aes.cbc_decrypt(cipher, g_plainTextBuf, blocks, iv) == FAILURE) {
       logMessage("failure on decrypt");
       return 0;
   } else {
-    logBuffer("decrypted: ", plainTextBuf, size);
-    logMessage((char*) plainTextBuf);
+    logBuffer("decrypted: ", g_plainTextBuf, size);
+    logMessage((char*) g_plainTextBuf);
 
-    datasize = plainTextBuf[N_BLOCK];
+    datasize = g_plainTextBuf[N_BLOCK];
     
     if( bufsize < datasize) {
       snprintf(logmsg, maxlen, "decrypt: bufsize: %d too small size: %d", bufsize, datasize);
@@ -468,7 +496,7 @@ byte decryptData(byte *cipher, byte *decrypted, const int size, const int bufsiz
       return 0;
     }
 
-    memcpy(decrypted, &plainTextBuf[N_BLOCK+1], datasize);  
+    memcpy(decrypted, &g_plainTextBuf[N_BLOCK+1], datasize);  
     return datasize;
   }
 }
@@ -483,15 +511,23 @@ bool validateHeader(const char *buf, const int buflen) {
   char logmsg[maxlen];
   
   if(buf == NULL || buflen < (sigSize + 1) || strncmp(buf, initSig, sigSize) != 0) {
+    logBuffer("validate buf: ", buf, buflen);
     logMessage("state missing from packet header, resetting to init");
+    
+    if(strncmp(buf, initSig, sigSize) != 0) {
+      logMessage("bad header");
+      logStrValue("buf:",buf);
+      logStrValue("fixed sig:", initSig);
+    }
+
     changeState(STATE_INIT);
     return false;
   }
   
   byte state = (byte) buf[sigSize];
   
-  if(state != currentState) {
-    snprintf(logmsg, maxlen, "Invalid state expect %d got %d restarting...", currentState, state);
+  if(state != g_currentState) {
+    snprintf(logmsg, maxlen, "Invalid state expect %d got %d restarting...", g_currentState, state);
     logMessage(logmsg);
     changeState(STATE_INIT);
     return false;
@@ -504,25 +540,25 @@ bool validateHeader(const char *buf, const int buflen) {
 int addReplyHdr(char *buf) { 
   int replyLength = strlen(initReplySig);
   strncpy(buf, initReplySig, replyLength);
-  buf[replyLength] = currentState;
+  buf[replyLength] = g_currentState;
   return replyLength + sizeof(byte);
 }
 
 void sendReplyMessage(const char *msgData, int dataSize) {
-  int hdrSize = addReplyHdr(txPacketBuffer);
+  int hdrSize = addReplyHdr(g_txPacketBuffer);
   int msgSize = hdrSize + dataSize;
   
   if(msgData != NULL) {
-    memcpy(&txPacketBuffer[hdrSize], msgData, dataSize);
+    memcpy(&g_txPacketBuffer[hdrSize], msgData, dataSize);
   }
   
-  udpSendPacket(configAgentIp, INIT_SEND, txPacketBuffer, msgSize);
-  logBuffer("tx msg: ", txPacketBuffer, msgSize);
+  udpSendPacket(g_configAgentIp, INIT_SEND, g_txPacketBuffer, msgSize);
+  logBuffer("tx msg: ", g_txPacketBuffer, msgSize);
 }
 
 bool parseServerIpAddress() {
   int partCnt;
-  char *current = mqttServerDNS;
+  char *current = g_mqttServerDNS;
   char *next;
   bool isValid = true;
   
@@ -530,7 +566,7 @@ bool parseServerIpAddress() {
     long ipAddrPart = strtol(current, &next, 10);
     
     if((*next == '.' || *next == 0) && ipAddrPart <= 255 ) {
-      mqttServerIp[i] = (byte) ipAddrPart;
+      g_mqttServerIp[i] = (byte) ipAddrPart;
       current = next+1;
     } else {
       isValid = false;
@@ -543,23 +579,24 @@ bool parseServerIpAddress() {
 * Methods for dealing with config
 ***/
 bool readConfig() {
-  mqttPort = readUIntFromEEProm(MQTT_PORT_START);
+  g_mqttPort = readUIntFromEEProm(MQTT_PORT_START);
   int maxlen = 100;
   char logmsg [maxlen];  
 
-  readStrFromEEProm(MQTT_SRV_START, mqttServerDNS, MQTT_SRV_MAX);
+  readStrFromEEProm(MQTT_SRV_START, g_mqttServerDNS, MQTT_SRV_MAX);
+  g_lastMsgSequence = readULongFromEEProm(MQTT_LAST_TIMESTAMP);
 
-  if(mqttPort != UINT_MAX) {
-    snprintf(logmsg, maxlen, "Read configuration: %s:%d", mqttServerDNS, mqttPort);
+  if(g_mqttPort != UINT_MAX) {
+    snprintf(logmsg, maxlen, "Read configuration: %s:%d", g_mqttServerDNS, g_mqttPort);
     logMessage(logmsg);
-    readBufFromEEProm(KEY_START, aesKey, KEY_LENGTH);
-    logBuffer("key: ", aesKey, KEY_LENGTH);
+    readBufFromEEProm(KEY_START, g_aesKey, KEY_LENGTH);
+    logBuffer("key: ", g_aesKey, KEY_LENGTH);
     return true;
   }   
   return false;
 }
 
-bool writeConfig(const char *mqttSrv, const int port, const byte *key) {
+bool writeConfig(const char *mqttSrv, const uint32_t port, const byte *key, const uint32_t seq) {
   if(mqttSrv == NULL || key == NULL) {
     return false;
   } 
@@ -568,11 +605,12 @@ bool writeConfig(const char *mqttSrv, const int port, const byte *key) {
   int maxlen = 100;
   char logmsg[maxlen];
 
-  if(mqttPort != 0) { 
-    writeIntToEEProm(MQTT_PORT_START, mqttPort);
+  if(g_mqttPort != 0) { 
+    writeUIntToEEProm(MQTT_PORT_START, g_mqttPort);
     writeStrToEEProm(MQTT_SRV_START, mqttSrv, srvSize);
     writeBufToEEProm(KEY_START, key, KEY_LENGTH);    
-    snprintf(logmsg, maxlen, "Write configuration: %s:%d", mqttSrv, mqttPort);
+    writeULongToEEProm(MQTT_LAST_TIMESTAMP, seq);
+    snprintf(logmsg, maxlen, "Write configuration: %s:%d", mqttSrv, g_mqttPort);
     logMessage(logmsg);
     return true;
   }
@@ -587,13 +625,13 @@ void setMqttConfig() {
 
     if(parseServerIpAddress()) {
       snprintf(logmsg, maxlen,"Connect mqtt @ address: %s:%d", 
-          ipToStr(mqttServerIp, ipaddStr, 24), mqttPort);
+          ipToStr(g_mqttServerIp, ipaddStr, 24), g_mqttPort);
       logMessage(logmsg);
-      mqttClient.setServer(mqttServerIp, mqttPort);
+      mqttClient.setServer(g_mqttServerIp, g_mqttPort);
     } else {
-      snprintf(logmsg, maxlen, "Connect mqtt @ address: %s:%d", mqttServerDNS, mqttPort);
+      snprintf(logmsg, maxlen, "Connect mqtt @ address: %s:%d", g_mqttServerDNS, g_mqttPort);
       logMessage(logmsg);
-      mqttClient.setServer(mqttServerDNS, mqttPort);        
+      mqttClient.setServer(g_mqttServerDNS, g_mqttPort);        
     }  
 }
 
@@ -605,17 +643,16 @@ void initializeState() {
   if(getDhcpAddr()) {
     if(!readConfig()) {
       changeState(STATE_ASSIGNING);
-      Udp.begin(BCAST_PORT);
+      g_Udp.begin(BCAST_PORT);
     } else {
       // check if IP address, if so then initiate with ip else initiate with dns.
       setMqttConfig();
 
-      byte succ = aes.set_key (aesKey, KEY_BITS);     
+      byte succ = g_aes.set_key (g_aesKey, KEY_BITS);     
       if(succ != SUCCESS) {
          logMessage("Failure setting encryption key");
       }
-
-      changeState(STATE_CONNECTING);
+changeState(STATE_CONNECTING);
     }
   }
 }
@@ -624,12 +661,12 @@ void assignState() {
   int packetSize = udpReadPacket();
   
   if( packetSize > 0)  {
-    configAgentIp = Udp.remoteIP();
-    logPacket(packetSize, configAgentIp, Udp.remotePort(), rcvPacketBuffer);
+    g_configAgentIp = g_Udp.remoteIP();
+    logPacket(packetSize, g_configAgentIp, g_Udp.remotePort(), g_rcvPacketBuffer);
     
-    if(validateHeader(rcvPacketBuffer, UDP_TX_PACKET_MAX_SIZE)){
+    if(validateHeader(g_rcvPacketBuffer, UDP_TX_PACKET_MAX_SIZE)){
       changeState(STATE_INITIALIZE_CONFIG);
-      sendReplyMessage(deviceId, strlen(deviceId));
+      sendReplyMessage(g_lockId, strlen(g_lockId));
     }
   }
 }
@@ -640,26 +677,34 @@ void configState() {
   char logmsg[maxlen];
 
   if( packetSize > 0)  { 
-      logPacket(packetSize, Udp.remoteIP(), Udp.remotePort(), rcvPacketBuffer); 
+      logPacket(packetSize, g_Udp.remoteIP(), g_Udp.remotePort(), g_rcvPacketBuffer); 
    
-     if(configAgentIp == Udp.remoteIP() && packetSize > MIN_INIT_PACKET) {
-       logBuffer("rcvd config: ", rcvPacketBuffer, packetSize);     
+     if(g_configAgentIp == g_Udp.remoteIP() && packetSize > MIN_INIT_PACKET) {
+       logBuffer("rcvd config: ", g_rcvPacketBuffer, packetSize);     
        
-       if(validateHeader(rcvPacketBuffer, packetSize)) { 
-          mqttPort = ((int) rcvPacketBuffer[INIT_PACKET_PORT_INDEX]) << 8 
-                            | rcvPacketBuffer[INIT_PACKET_PORT_INDEX+1];
-          memcpy(aesKey, &rcvPacketBuffer[INIT_PACKET_KEY_INDEX], KEY_LENGTH);
+       if(validateHeader(g_rcvPacketBuffer, packetSize)) { 
+          g_mqttPort = ((uint16_t) g_rcvPacketBuffer[INIT_PACKET_PORT_INDEX]) << 8 
+                            | g_rcvPacketBuffer[INIT_PACKET_PORT_INDEX+1];
+          g_lastMsgSequence =((uint32_t) g_rcvPacketBuffer[INIT_PACKET_COUNTER_INDEX] << 24 
+                           | (uint32_t) g_rcvPacketBuffer[INIT_PACKET_COUNTER_INDEX+1] << 16
+                           | (uint16_t) g_rcvPacketBuffer[INIT_PACKET_COUNTER_INDEX+2] << 8
+                           | (byte) g_rcvPacketBuffer[INIT_PACKET_COUNTER_INDEX]);
+
+          memcpy(g_aesKey, &g_rcvPacketBuffer[INIT_PACKET_KEY_INDEX], KEY_LENGTH);
           int sizeServer = packetSize - INIT_PACKET_SERVER_INDEX;
 
-          if(sizeServer > 0 && sizeServer < MQTT_SRV_MAX-1) {          
-            strncpy(mqttServerDNS, &rcvPacketBuffer[INIT_PACKET_SERVER_INDEX], sizeServer);
-            mqttServerDNS[sizeServer] = 0;
-            snprintf(logmsg, maxlen, "configured server: %s:%d", mqttServerDNS, mqttPort);
+          if(sizeServer > 0 && sizeServer < MQTT_SRV_MAX-1) {                   
+            strncpy(g_mqttServerDNS, &g_rcvPacketBuffer[INIT_PACKET_SERVER_INDEX], sizeServer);
+            logStrValue("config server: ", g_mqttServerDNS);
+            g_mqttServerDNS[sizeServer] = 0;
+            snprintf(logmsg, maxlen, "configured server: %s:%d", g_mqttServerDNS, g_mqttPort);
             logMessage(logmsg);
-            logBuffer("key: ", aesKey, KEY_LENGTH);
+            logBuffer("key: ", g_aesKey, KEY_LENGTH);
           
-            if(writeConfig(mqttServerDNS, mqttPort, aesKey)) {
+            if(writeConfig(g_mqttServerDNS, g_mqttPort, g_aesKey, g_lastMsgSequence)) {
                logMessage( "config completed");
+               readConfig();
+                g_aes.set_key (g_aesKey, KEY_BITS);
                changeState(STATE_TESTING_CONFIG);
                sendReplyMessage(NULL, 0);
              } else {
@@ -692,7 +737,7 @@ void testMqttState() {
   if(connectMqttState()) {
     sendReplyMessage(successMsg, sizeof(successMsg));
  } else {
-   snprintf(logmsg, maxlen, "failed connect: %s:%d", mqttServerDNS, mqttPort);
+   snprintf(logmsg, maxlen, "failed connect: %s:%d", g_mqttServerDNS, g_mqttPort);
    int sz = strnlen(logmsg, maxlen); 
    sendReplyMessage(logmsg, sz);
    logMessage(logmsg);
@@ -703,8 +748,8 @@ bool connectMqttState() {
   logMessage("attempting to communicate with mqtt server");
   
   if (mqttClient.connect("locker")) {
-    mqttClient.publish("lockregister",deviceId);
-    mqttClient.subscribe(deviceId);
+    mqttClient.publish("lockregister",g_lockId);
+    mqttClient.subscribe(g_lockId);
     changeState(STATE_RUNNING);
   } else {
       logMessage("failed to connect with mqtt server");
@@ -727,20 +772,30 @@ int encryptAndSignMessagePayload(char *target, const char *payload, const int bu
     logStrValue("unencrypted payload:", payload);
 
     int encryptSize = encryptDataEIV(payload, size);
-    logBuffer("encrypted: ", cipherBuf, encryptSize);
+    logBuffer("encrypted: ", g_cipherBuf, encryptSize);
 
     // encryptData will limit result to MAX_ENCRYPT_DATA_SIZE, will return 0 if exceeded.
     int totalSize = encryptSize + START_ENCRYPT_DATA + SHA256_LENGTH;
 
     if(encryptSize > 0 && totalSize <= bufSize) {
-      strncpy( (char *) target, deviceId, MAX_ENCRYPT_MSG );
-      memcpy(target + START_ENCRYPT_DATA, cipherBuf, encryptSize);
+      strncpy( (char *) target, g_lockId, MAX_ENCRYPT_MSG );
+      memcpy(target + START_ENCRYPT_DATA, g_cipherBuf, encryptSize);
       signAndAppendSha256Hmac(target, encryptSize + START_ENCRYPT_DATA, bufSize);
       return totalSize;
     } else {
        logIntValue("encrypt failed, exceeded size of max encrypt:", totalSize);
        return 0;
     }
+}
+
+bool isValidSequence(uint32_t seq) {
+  if(seq > g_lastMsgSequence ) {
+    g_lastMsgSequence = seq;
+    writeULongToEEProm(MQTT_LAST_TIMESTAMP, seq);
+    return true;
+  }
+
+  return false;
 }
 
 void handleLockMessage(char *message, const int size) {
@@ -754,16 +809,27 @@ void handleLockMessage(char *message, const int size) {
   } else {
     msg.printTo(Serial);
     bool lockState = (bool) msg["lock"];
+    uint32_t seq = (uint32_t) msg["seq"];
 
-    if(lockState) {
-       lockMsg = "{\"locked\":true}";
-    } else {
-       lockMsg = "{\"locked\":false}";
+   
+    if(isValidSequence(seq)) {
+      if(lockState) {
+         lockMsg = "{\"locked\":true}";
+      } else {
+         lockMsg = "{\"locked\":false}";
+      }
+
+      int size = encryptAndSignMessagePayload(encryptedMsg, lockMsg, MAX_ENCRYPT_MSG);    
+      mqttClient.publish(controlTopic, (byte*) encryptedMsg, size);
+      logBuffer("ending msg ", encryptedMsg, size);
+    }else {
+      int msglen = 100;
+      char message[msglen];
+      snprintf(message, msglen, "invalid seq: %lu", seq);
+      logMessage(message);
+
+      // ignore bad messages, could be a replay.  Intentionally no reply.
     }
-
-    int size = encryptAndSignMessagePayload(encryptedMsg, lockMsg, MAX_ENCRYPT_MSG);    
-    mqttClient.publish(controlTopic, (byte*) encryptedMsg, size);
-    logBuffer("ending msg ", encryptedMsg, size);
   }
 }
 
@@ -814,15 +880,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 
 void setup() {
-  rcvPacketBuffer[UDP_TX_PACKET_MAX_SIZE] = 0;  // safety termination for strings.
+  g_rcvPacketBuffer[UDP_TX_PACKET_MAX_SIZE] = 0;  // safety termination for strings.
   Serial.begin(9600);
 }
 
 
 void loop() {
-  switch(currentState)
+  switch(g_currentState)
   {
     case STATE_INIT:
+      logMessage("entering init");
       initializeState();
       break;
     case STATE_ASSIGNING:
@@ -841,7 +908,7 @@ void loop() {
      runState();
       break;
     default:
-      logIntValue("Resetting to init, invalid state: ", currentState);
+      logIntValue("Resetting to init, invalid state: ", g_currentState);
       changeState(STATE_INIT);
       break;
   }
