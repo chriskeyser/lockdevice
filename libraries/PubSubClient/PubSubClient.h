@@ -11,7 +11,8 @@
 #include "Client.h"
 
 // MQTT_MAX_PACKET_SIZE : Maximum packet size
-#define MQTT_MAX_PACKET_SIZE 128
+// CAK MOD MADE 255
+#define MQTT_MAX_PACKET_SIZE 255
 
 // MQTT_KEEPALIVE : keepAlive interval in Seconds
 #define MQTT_KEEPALIVE 15
